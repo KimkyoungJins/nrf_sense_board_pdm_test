@@ -1,13 +1,22 @@
 {
     "configurations": [
         {
-            "name": "Mac",
+            "name": "nRF52840",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "${userHome}/ncs/v2.x.x/zephyr/include",
+                "${userHome}/ncs/v2.x.x/nrf/include",
+                "${userHome}/ncs/v2.x.x/nrfxlib/includes",
+                "${userHome}/ncs/toolchains/v2.x.x/opt/zephyr-sdk/arm-none-eabi/arm-none-eabi/include"
             ],
-            "defines": [],
-            "compilerPath": "/usr/bin/clang",
-            "intelliSenseMode": "macos-clang-arm64"
+            "defines": [
+                "NRF52840_XXAA",
+                "ZEPHYR_KERNEL"
+            ],
+            /* 빌드 폴더 안에 생성된 컴파일 정보를 연결하는 것이 가장 확실합니다 */
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "compilerPath": "${userHome}/ncs/toolchains/v2.x.x/opt/zephyr-sdk/arm-none-eabi/bin/arm-none-eabi-gcc",
+            "intelliSenseMode": "gcc-arm"
         }
     ],
     "version": 4
