@@ -1,92 +1,102 @@
-/*
- * Copyright (c) 2021 Nordic Semiconductor ASA
- * SPDX-License-Identifier: Apache-2.0
- */
-
 #include <zephyr/kernel.h>
 #include <zephyr/audio/dmic.h>
-#include <zephyr/logging/log.h>
-#include <stdlib.h> // abs() 함수 사용을 위해 추가
+#include <zephyr/drivers/gpio.h>
 
-LOG_MODULE_REGISTER(dmic_sample);
+#define MIC_PWR_PIN  10
+const struct device *gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
 #define MAX_SAMPLE_RATE  16000
 #define SAMPLE_BIT_WIDTH 16
 #define BYTES_PER_SAMPLE sizeof(int16_t)
-#define READ_TIMEOUT     1000
+#define READ_TIMEOUT     2000 // 타임아웃을 조금 더 늘림
 
 #define BLOCK_SIZE(_sample_rate, _number_of_channels) \
     (BYTES_PER_SAMPLE * (_sample_rate / 10) * _number_of_channels)
 
-#define MAX_BLOCK_SIZE   BLOCK_SIZE(MAX_SAMPLE_RATE, 2)
+#define MAX_BLOCK_SIZE   BLOCK_SIZE(MAX_SAMPLE_RATE, 1) 
 #define BLOCK_COUNT      4
 
 K_MEM_SLAB_DEFINE_STATIC(mem_slab, MAX_BLOCK_SIZE, BLOCK_COUNT, 4);
 
-static int do_pdm_transfer(const struct device *dmic_dev,
-               struct dmic_cfg *cfg,
-               size_t block_count)
+static void stream_raw_pdm_data(const struct device *dmic_dev, struct dmic_cfg *cfg)
 {
     int ret;
 
-    // 설정 로그는 처음 시작할 때만 출력되도록 유지
+    // [Step 1] GPIO 확인
+    if (!device_is_ready(gpio1_dev)) {
+        printk("[DEBUG] Error: GPIO1 device not ready\n");
+        return;
+    }
+
+    // [Step 2] 마이크 전원 공급 및 대기
+    printk("[DEBUG] Powering on Microphone (P1.10)...\n");
+    gpio_pin_configure(gpio1_dev, MIC_PWR_PIN, GPIO_OUTPUT_ACTIVE);
+    k_msleep(500); // 안정화를 위해 충분히 대기 (500ms)
+
+    // [Step 3] DMIC 설정
     ret = dmic_configure(dmic_dev, cfg);
     if (ret < 0) {
-        LOG_ERR("Failed to configure the driver: %d", ret);
-        return ret;
+        printk("[DEBUG] Configuration failed: %d\n", ret);
+        return;
     }
+    printk("[DEBUG] DMIC configured successfully\n");
 
+    // [Step 4] 스트리밍 시작
     ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
     if (ret < 0) {
-        LOG_ERR("START trigger failed: %d", ret);
-        return ret;
+        printk("[DEBUG] Trigger START failed: %d\n", ret);
+        return;
     }
+    printk("[DEBUG] Data streaming started. Speak into the mic!\n");
 
-    // 지정된 횟수만큼 블록을 읽음
-    for (int i = 0; i < block_count; ++i) {
-        int16_t *buffer; // 데이터를 16비트 정수로 바로 접근하기 위해 형변환 준비
+    int block_cnt = 0;
+    while (1) {
+        int16_t *buffer;
         uint32_t size;
 
+        // [Step 5] 데이터 읽기 시도
         ret = dmic_read(dmic_dev, 0, (void **)&buffer, &size, READ_TIMEOUT);
         if (ret < 0) {
-            LOG_ERR("%d - read failed: %d", i, ret);
-            break;
+            printk("[DEBUG] Read Error at block %d: %d\n", block_cnt, ret);
+            // 만약 -11(EAGAIN)이 뜨면 데이터가 아직 준비 안 된 것임
+            k_msleep(10);
+            continue; 
         }
 
-        // --- [실시간 데이터 확인 로직 추가] ---
+        block_cnt++;
         uint32_t num_samples = size / BYTES_PER_SAMPLE;
-        int32_t sum = 0;
-        
-        // 간이 음량 계산: 샘플들의 절대값 평균을 구함
-        for (uint32_t j = 0; j < num_samples; j++) {
-            sum += abs(buffer[j]);
-        }
-        int32_t avg_volume = sum / num_samples;
 
-        // 터미널에 실시간으로 첫 번째 샘플값과 평균 음량 출력
-        // %6d는 정렬을 위해 6자리를 차지하도록 설정한 것임
-        printk("Sample[0]: %6d | Avg Volume: %6d | Bytes: %u\n", buffer[0], avg_volume, size);
-        // --------------------------------------
+        // [Step 6] 데이터 모니터링 (10번 블록마다 출력하여 시리얼 부하 감소)
+        if (block_cnt % 10 == 0) {
+            printk("[DEBUG] Block %d received (%d samples). First sample: %d\n", 
+                    block_cnt, num_samples, buffer[0]);
+        }
+
+        // 마이크 앞에서 소리를 냈을 때 수치가 변하는지 확인하기 위해
+        // 100개 샘플 중 가장 큰 값을 찾아 출력해봅니다 (피크 감지)
+        int16_t max_val = 0;
+        for (uint32_t i = 0; i < num_samples; i++) {
+            if (buffer[i] > max_val) max_val = buffer[i];
+        }
+        
+        // 소리가 감지될 때만 출력 (임계값 500 이상일 때)
+        if (max_val > 500 || max_val < -500) {
+            printk("Peak detected: %d\n", max_val);
+        }
 
         k_mem_slab_free(&mem_slab, buffer);
     }
-
-    // 루프가 끝나면 중지 (무한 루프에서 호출할 경우 실제로는 이 부분에 도달하지 않게 설계 가능)
-    dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
-
-    return ret;
 }
 
 int main(void)
 {
-    const struct device *const dmic_dev = DEVICE_DT_GET(DT_NODELABEL(dmic_dev));
+    printk("--- Seeed Studio XIAO nRF52840 PDM Debugger Start ---\n");
     
-    // 터미널(picocom)을 켤 시간을 벌기 위해 2초 대기
-    k_msleep(2000);
-    printk("\n--- PDM Real-time Monitoring Start ---\n");
+    const struct device *const dmic_dev = DEVICE_DT_GET(DT_NODELABEL(dmic_dev));
+    k_msleep(2000); 
 
     if (!device_is_ready(dmic_dev)) {
-        LOG_ERR("%s is not ready", dmic_dev->name);
+        printk("[DEBUG] DMIC device not ready. Check your overlay file!\n");
         return 0;
     }
 
@@ -108,24 +118,12 @@ int main(void)
         },
     };
 
-    // 모노 설정
     cfg.channel.req_num_chan = 1;
     cfg.channel.req_chan_map_lo = dmic_build_channel_map(0, 0, PDM_CHAN_LEFT);
     cfg.streams[0].pcm_rate = MAX_SAMPLE_RATE;
     cfg.streams[0].block_size = BLOCK_SIZE(cfg.streams[0].pcm_rate, cfg.channel.req_num_chan);
 
-    // [무한 루프 추가] 
-    // 프로그램을 종료하지 않고 실시간으로 계속 데이터를 받습니다.
-    while (1) {
-        // 한 번 호출 시 4개의 블록(0.4초치)을 처리하고 루프를 돎
-        int ret = do_pdm_transfer(dmic_dev, &cfg, BLOCK_COUNT);
-        if (ret < 0) {
-            printk("Transfer error! Restarting...\n");
-            k_msleep(1000);
-        }
-        // CPU가 너무 과열되지 않게 아주 잠깐 쉬어줌
-        k_yield();
-    }
+    stream_raw_pdm_data(dmic_dev, &cfg);
 
     return 0;
 }
