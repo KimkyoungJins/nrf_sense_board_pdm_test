@@ -6,8 +6,8 @@
 #define MIC_PWR_PIN  10
 const struct device *gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
-/* 소리 감지 임계값 (상황에 따라 500 ~ 5000 사이로 조절하세요) */
-#define DETECT_THRESHOLD  2000 
+/* 소리 감지 임계값 (상황에 맞게 1000 ~ 10000 사이로 조절하세요) */
+#define DETECT_THRESHOLD  1500 
 
 #define MAX_SAMPLE_RATE  16000
 #define SAMPLE_BIT_WIDTH 16
@@ -26,7 +26,7 @@ static void stream_raw_pdm_data(const struct device *dmic_dev, struct dmic_cfg *
 {
     int ret;
 
-    /* 마이크 전원 켜기 (P1.10) */
+    /* 마이크 전원 켜기 */
     if (!device_is_ready(gpio1_dev)) {
         printk("Error: GPIO1 not ready\n");
         return;
@@ -41,7 +41,7 @@ static void stream_raw_pdm_data(const struct device *dmic_dev, struct dmic_cfg *
     ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
     if (ret < 0) return;
 
-    printk("--- Sound Detection Mode Start (Threshold: %d) ---\n", DETECT_THRESHOLD);
+    printk("--- Data Streaming with Detection Mode ---\n");
 
     while (1) {
         int16_t *buffer;
@@ -50,27 +50,23 @@ static void stream_raw_pdm_data(const struct device *dmic_dev, struct dmic_cfg *
         ret = dmic_read(dmic_dev, 0, (void **)&buffer, &size, READ_TIMEOUT);
         if (ret == 0) {
             uint32_t num_samples = size / BYTES_PER_SAMPLE;
-            int16_t max_val = 0;
-            bool detected = false;
+            int16_t block_max = 0;
 
-            /* 이번 블록에서 가장 큰 소리 값 찾기 */
-            for (uint32_t i = 0; i < num_samples; i++) {
-                // 음수 값도 있으므로 절대값으로 비교
-                int16_t abs_val = (buffer[i] < 0) ? -buffer[i] : buffer[i];
-                
-                if (abs_val > max_val) {
-                    max_val = abs_val;
-                }
+            /* 1. 데이터를 계속 출력 (그래프용) */
+            for (uint32_t j = 0; j < num_samples; j += 20) {
+                printk("%d\n", buffer[j]);
 
-                /* 설정한 임계값을 넘으면 감지 플래그 활성화 */
-                if (abs_val > DETECT_THRESHOLD) {
-                    detected = true;
+                /* 2. 출력하는 중에 가장 큰 절대값을 체크 */
+                int16_t abs_val = (buffer[j] < 0) ? -buffer[j] : buffer[j];
+                if (abs_val > block_max) {
+                    block_max = abs_val;
                 }
             }
 
-            /* 큰 소리가 감지되었을 때만 메시지 출력 */
-            if (detected) {
-                printk("[!] Sound Detected! Peak Value: %d\n", max_val);
+            /* 3. 이번 데이터 묶음(Block) 중에 임계값을 넘는 큰 소리가 있었다면 메시지 출력 */
+            if (block_max > DETECT_THRESHOLD) {
+                // 시리얼 플로터 데이터 사이에서 잘 보이도록 문구 출력
+                printk(">> [DETECTED] Peak: %d <<\n", block_max);
             }
 
             k_mem_slab_free(&mem_slab, buffer);
